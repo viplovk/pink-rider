@@ -15,8 +15,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
 
   <!-- Preload high-fidelity campaign portraits -->
-  <link rel="preload" as="image" href="/assets/viplov_front.png">
-  <link rel="preload" as="image" href="/assets/viplov_back.png">
+  <link rel="preload" as="image" href="/assets/viplov_front.png" crossorigin="anonymous">
+  <link rel="preload" as="image" href="/assets/viplov_back.png" crossorigin="anonymous">
 
   <style>
     /* =====================================================================
@@ -401,12 +401,6 @@
       background: var(--ink);
       border-radius: 50%;
       display: inline-block;
-      animation: pulseDot 2s ease-in-out infinite;
-    }
-
-    @keyframes pulseDot {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.35; transform: scale(0.85); }
     }
 
     /* =====================================================================
@@ -721,7 +715,7 @@
 
       <!-- Central Cutout Figure & Mask Reveal Canvas -->
       <div class="figure" id="figure">
-        <img id="front" alt="Viplov wearing a white shirt" src="/assets/viplov_front.png">
+        <img id="front" crossorigin="anonymous" alt="Viplov wearing a white shirt" src="/assets/viplov_front.png">
         <canvas id="reveal" aria-label="Interactive reveal canvas showing Viplov motorcycle edition"></canvas>
       </div>
 
@@ -774,10 +768,12 @@
       const hintText = document.getElementById('hintText');
       const ctx = canvas.getContext('2d');
 
-      // Detect touch / coarse devices
-      const isTouch = window.matchMedia('(hover: none), (pointer: coarse)').matches;
+      // Detect touch / coarse devices or mobile viewport
+      const isTouch = window.matchMedia('(hover: none), (pointer: coarse)').matches || window.innerWidth <= 820;
       if (isTouch) {
-        hintText.textContent = 'Drag to transform';
+        hintText.textContent = 'Drag to transform · Double-tap to reset';
+      } else {
+        hintText.textContent = 'Move cursor to transform · Click brand to reset';
       }
 
       // -------------------------------------------------------------
@@ -878,255 +874,271 @@
 
         if (imagesLoaded && imgFront.naturalWidth && imgFront.naturalHeight) {
           fit = computeFit(canvasW, canvasH, imgFront.naturalWidth, imgFront.naturalHeight);
+          updateComposite();
         }
       }
 
       window.addEventListener('resize', resizeCanvas, { passive: true });
 
       // -------------------------------------------------------------
-      // 4. ORGANIC BRUSH ENGINE & POINTER INTERPOLATION
+      // 4. USER-CONTROLLED VISCOUS LIQUID REVEAL ENGINE
+      // 100% user-controlled: mouse movement or touch drag creates a
+      // continuous flowing liquid mask. When user stops, inertia settles
+      // immediately into a completely stable, stationary state.
+      // ZERO auto-wander, ZERO periodic pulsing, ZERO random droplet spawning.
       // -------------------------------------------------------------
-      const BRUSH_LIFESPAN = 1100; // milliseconds
-      const stamps = [];
+      const FLUID_CONFIG = {
+        spring: 0.35,           // Spring stiffness toward cursor
+        damping: 0.68,          // Viscous fluid damping
+        baseRadius: 76,         // Rich thick liquid stream radius in CSS px
+        minRadius: 38           // Minimum stream radius at max velocity
+      };
 
-      // Generate organic brush lobes: 3 to 5 overlapping circles with irregular offsets
-      function createOrganicStamp(x, y, baseRadius) {
-        const lobeCount = 3 + Math.floor(Math.random() * 3); // 3 to 5 lobes
-        const lobes = [];
+      // Inertial physical fluid head (tracks user cursor/finger)
+      const fluidHead = {
+        x: 0,
+        y: 0,
+        lastX: 0,
+        lastY: 0,
+        vx: 0,
+        vy: 0,
+        targetX: 0,
+        targetY: 0,
+        currentR: 76,
+        lastR: 76,
+        active: false,
+        isMoving: false,
+        speed: 0
+      };
 
-        // Center lobe
-        lobes.push({
-          ox: 0,
-          oy: 0,
-          r: baseRadius * (0.8 + Math.random() * 0.3)
-        });
-
-        // Satellite lobes around perimeter for textured organic brush edge
-        for (let i = 0; i < lobeCount - 1; i++) {
-          const angle = (i / (lobeCount - 1)) * Math.PI * 2 + (Math.random() - 0.5) * 0.8;
-          const dist = baseRadius * (0.28 + Math.random() * 0.38);
-          const r = baseRadius * (0.45 + Math.random() * 0.4);
-          lobes.push({
-            ox: Math.cos(angle) * dist,
-            oy: Math.sin(angle) * dist,
-            r: r
-          });
-        }
-
-        return {
-          x,
-          y,
-          baseRadius,
-          lobes,
-          birth: performance.now(),
-          maxAge: BRUSH_LIFESPAN
-        };
-      }
-
-      function addStamp(canvasX, canvasY, radius = 54) {
-        stamps.push(createOrganicStamp(canvasX, canvasY, radius * dpr));
-      }
-
-      // Interpolate between pointer coordinates so fast gestures leave continuous strokes
-      let lastPointer = null;
-
-      function handlePointerStroke(clientX, clientY, customRadius) {
-        const rect = figure.getBoundingClientRect();
-        const px = (clientX - rect.left) * dpr;
-        const py = (clientY - rect.top) * dpr;
-
-        // Check if pointer is reasonably near or inside figure bounds
-        if (clientX < rect.left - 40 || clientX > rect.right + 40 ||
-            clientY < rect.top - 40 || clientY > rect.bottom + 40) {
-          lastPointer = null;
-          return;
-        }
-
-        const r = customRadius || (isTouch ? 58 : 50);
-
-        if (!lastPointer) {
-          addStamp(px, py, r);
-          lastPointer = { x: px, y: py };
-          return;
-        }
-
-        const dx = px - lastPointer.x;
-        const dy = py - lastPointer.y;
+      // Draw continuous smoothed liquid capsule between two points
+      function drawFluidCapsule(x0, y0, r0, x1, y1, r1) {
+        const dx = x1 - x0;
+        const dy = y1 - y0;
         const dist = Math.hypot(dx, dy);
-        const step = Math.max(12 * dpr, 8);
 
-        // Modulate atmospheric soundscape according to brush stroke speed
-        const speed = Math.min(dist / Math.max(step, 1), 3);
-        triggerBrushSound(speed);
-
-        if (dist > step) {
-          const steps = Math.floor(dist / step);
-          for (let i = 1; i <= steps; i++) {
-            const t = i / steps;
-            const ix = lastPointer.x + dx * t;
-            const iy = lastPointer.y + dy * t;
-            addStamp(ix, iy, r);
-          }
-        } else {
-          addStamp(px, py, r);
+        maskCtx.fillStyle = '#000000';
+        if (dist < 0.5) {
+          maskCtx.beginPath();
+          maskCtx.arc(x1, y1, r1, 0, Math.PI * 2);
+          maskCtx.fill();
+          return;
         }
 
-        lastPointer = { x: px, y: py };
+        const angle = Math.atan2(dy, dx);
+        const norm = angle + Math.PI / 2;
+
+        maskCtx.beginPath();
+        // Arc around p0
+        maskCtx.arc(x0, y0, r0, norm, norm + Math.PI);
+        // Arc around p1
+        maskCtx.arc(x1, y1, r1, norm + Math.PI, norm + Math.PI * 2);
+        maskCtx.closePath();
+        maskCtx.fill();
+      }
+
+      // Append continuous fluid segment with viscous velocity-based thinning
+      function applyFluidMovement(nextX, nextY, speed) {
+        const dist = Math.hypot(nextX - fluidHead.lastX, nextY - fluidHead.lastY);
+        if (dist < 1.0) return;
+
+        const baseR = FLUID_CONFIG.baseRadius * dpr;
+        const minR = FLUID_CONFIG.minRadius * dpr;
+        const targetR = Math.max(minR, baseR / (1 + speed * 0.014));
+        fluidHead.currentR = fluidHead.currentR ? (fluidHead.currentR * 0.75 + targetR * 0.25) : targetR;
+
+        // Smooth sub-division for tight curvature and rapid gesture tracking
+        const stepSize = Math.max(4 * dpr, 6);
+        const steps = Math.min(Math.ceil(dist / stepSize), 10);
+        let prevX = fluidHead.lastX;
+        let prevY = fluidHead.lastY;
+        let prevR = fluidHead.lastR || fluidHead.currentR;
+
+        for (let s = 1; s <= steps; s++) {
+          const t = s / steps;
+          const curX = fluidHead.lastX + (nextX - fluidHead.lastX) * t;
+          const curY = fluidHead.lastY + (nextY - fluidHead.lastY) * t;
+          const curR = prevR + (fluidHead.currentR - prevR) * t;
+          drawFluidCapsule(prevX, prevY, prevR, curX, curY, curR);
+          prevX = curX;
+          prevY = curY;
+          prevR = curR;
+        }
+
+        fluidHead.x = nextX;
+        fluidHead.y = nextY;
+        fluidHead.lastX = nextX;
+        fluidHead.lastY = nextY;
+        fluidHead.lastR = fluidHead.currentR;
+
+        updateComposite();
+      }
+
+      // Compositing engine: blends front and back portraits using maskCanvas
+      function updateComposite() {
+        if (!imagesLoaded || canvasW === 0 || canvasH === 0) return;
+
+        // 1. Prepare backMaskCanvas: BACK image (motorcycle edition) masked by maskCanvas
+        backMaskCtx.clearRect(0, 0, canvasW, canvasH);
+        backMaskCtx.globalCompositeOperation = 'source-over';
+        backMaskCtx.drawImage(imgBack, fit.dx, fit.dy, fit.dw, fit.dh);
+        backMaskCtx.globalCompositeOperation = 'destination-in';
+        backMaskCtx.drawImage(maskCanvas, 0, 0);
+
+        // 2. Prepare bufferCanvas:
+        //    Step A: Draw FRONT portrait.
+        //    Step B: Erase FRONT inside continuous fluid mask (destination-out).
+        //    Step C: Draw transformed BACK image into the erased area (source-over).
+        bufferCtx.clearRect(0, 0, canvasW, canvasH);
+        bufferCtx.globalCompositeOperation = 'source-over';
+        bufferCtx.drawImage(imgFront, fit.dx, fit.dy, fit.dw, fit.dh);
+
+        bufferCtx.globalCompositeOperation = 'destination-out';
+        bufferCtx.drawImage(maskCanvas, 0, 0);
+
+        bufferCtx.globalCompositeOperation = 'source-over';
+        bufferCtx.drawImage(backMaskCanvas, 0, 0);
+
+        // 3. Output composited buffer onto main visible canvas
+        ctx.clearRect(0, 0, canvasW, canvasH);
+        ctx.drawImage(bufferCanvas, 0, 0);
+      }
+
+      // Reset reveal back to clean front portrait
+      function resetReveal() {
+        maskCtx.clearRect(0, 0, canvasW, canvasH);
+        fluidHead.active = false;
+        fluidHead.isMoving = false;
+        fluidHead.vx = 0;
+        fluidHead.vy = 0;
+        updateComposite();
       }
 
       // -------------------------------------------------------------
       // 5. POINTER & CURSOR EVENT LISTENERS
       // -------------------------------------------------------------
-      let isPointerDown = false;
-      let lastTouchTime = performance.now();
+      function handlePointerStroke(clientX, clientY) {
+        const rect = figure.getBoundingClientRect();
+        const px = (clientX - rect.left) * dpr;
+        const py = (clientY - rect.top) * dpr;
+
+        // Allow interaction over figure or hero bounds
+        if (clientX < rect.left - 60 || clientX > rect.right + 60 ||
+            clientY < rect.top - 60 || clientY > rect.bottom + 60) {
+          fluidHead.isMoving = false;
+          return;
+        }
+
+        if (!fluidHead.active) {
+          fluidHead.x = px;
+          fluidHead.y = py;
+          fluidHead.lastX = px;
+          fluidHead.lastY = py;
+          fluidHead.targetX = px;
+          fluidHead.targetY = py;
+          fluidHead.vx = 0;
+          fluidHead.vy = 0;
+          fluidHead.active = true;
+          fluidHead.isMoving = true;
+          fluidHead.currentR = FLUID_CONFIG.baseRadius * dpr;
+          fluidHead.lastR = FLUID_CONFIG.baseRadius * dpr;
+          // Initial stamp at contact point
+          drawFluidCapsule(px, py, fluidHead.currentR, px, py, fluidHead.currentR);
+          updateComposite();
+        } else {
+          fluidHead.targetX = px;
+          fluidHead.targetY = py;
+          fluidHead.isMoving = true;
+        }
+      }
 
       function onPointerMove(e) {
         const clientX = e.clientX;
         const clientY = e.clientY;
 
-        // Move custom cursor
         if (!isTouch) {
           cursor.style.transform = `translate3d(${clientX}px, ${clientY}px, 0) translate(-50%, -50%)`;
           document.body.classList.add('cursor-active');
         }
 
         handlePointerStroke(clientX, clientY);
-        lastTouchTime = performance.now();
       }
 
       hero.addEventListener('pointermove', onPointerMove, { passive: true });
 
       hero.addEventListener('pointerdown', (e) => {
-        isPointerDown = true;
-        lastTouchTime = performance.now();
-        lastPointer = null;
-        handlePointerStroke(e.clientX, e.clientY, isTouch ? 64 : 52);
+        handlePointerStroke(e.clientX, e.clientY);
       }, { passive: true });
 
       window.addEventListener('pointerup', () => {
-        isPointerDown = false;
-        lastPointer = null;
+        fluidHead.isMoving = false;
       }, { passive: true });
 
       hero.addEventListener('pointerleave', () => {
         if (!isTouch) {
           document.body.classList.remove('cursor-active');
         }
-        lastPointer = null;
+        fluidHead.isMoving = false;
       }, { passive: true });
 
-      // -------------------------------------------------------------
-      // 6. MOBILE AUTO-WANDER ON IDLE (Touch Devices)
-      // -------------------------------------------------------------
-      let wanderAngle = 0;
+      // Double-click or double-tap on figure resets reveal
+      figure.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        resetReveal();
+      });
 
-      function updateAutoWander(now) {
-        if (!isTouch && stamps.length > 0) return;
-
-        // If no user touch for 2500ms, gently reveal rider helmet and jacket
-        if (now - lastTouchTime > 2500 && imagesLoaded && canvasW > 0) {
-          wanderAngle += 0.035;
-
-          // Figure-relative Lissajous motion across upper torso and helmet area
-          const centerX = fit.dx + fit.dw * 0.5;
-          const centerY = fit.dy + fit.dh * 0.38;
-
-          const wx = centerX + Math.sin(wanderAngle) * (fit.dw * 0.22);
-          const wy = centerY + Math.sin(wanderAngle * 2) * (fit.dh * 0.14);
-
-          addStamp(wx, wy, 48);
-          triggerBrushSound(0.6);
-        }
+      // Clicking brand logo resets reveal
+      const brandLink = document.getElementById('brandLink');
+      if (brandLink) {
+        brandLink.addEventListener('click', (e) => {
+          e.preventDefault();
+          resetReveal();
+        });
       }
 
+      // Keyboard shortcut 'R' to reset reveal
+      window.addEventListener('keydown', (e) => {
+        if ((e.key === 'r' || e.key === 'R') && !modal.classList.contains('open')) {
+          resetReveal();
+        }
+      });
+
       // -------------------------------------------------------------
-      // 7. RENDER LOOP — PROPER COMPOSITING AND MASKING
+      // 6. PHYSICS & SETTLE LOOP
+      // Operates ONLY when user has initiated pointer motion.
+      // Glides smoothly to a stop within ~60-100ms when user stops moving,
+      // then settles to a 100% stationary state.
+      // ZERO auto-wander, ZERO periodic pulsing, ZERO idle animations.
       // -------------------------------------------------------------
-      function render(now) {
+      function render() {
         requestAnimationFrame(render);
 
         if (!imagesLoaded || canvasW === 0 || canvasH === 0) return;
 
-        // Check auto wander
-        updateAutoWander(now);
+        if (fluidHead.active) {
+          const dx = fluidHead.targetX - fluidHead.x;
+          const dy = fluidHead.targetY - fluidHead.y;
 
-        // 1. Update and draw active brush stamps onto offscreen maskCanvas
-        maskCtx.clearRect(0, 0, canvasW, canvasH);
+          fluidHead.vx = (fluidHead.vx + dx * FLUID_CONFIG.spring) * FLUID_CONFIG.damping;
+          fluidHead.vy = (fluidHead.vy + dy * FLUID_CONFIG.spring) * FLUID_CONFIG.damping;
 
-        let activeCount = 0;
-        for (let i = stamps.length - 1; i >= 0; i--) {
-          const s = stamps[i];
-          const age = (now - s.birth) / s.maxAge;
+          const nextX = fluidHead.x + fluidHead.vx;
+          const nextY = fluidHead.y + fluidHead.vy;
+          fluidHead.speed = Math.hypot(fluidHead.vx, fluidHead.vy);
 
-          if (age >= 1) {
-            stamps.splice(i, 1);
-            continue;
-          }
-
-          activeCount++;
-
-          // Easing for organic fade: strong visibility early, gentle falloff
-          const progress = 1 - age;
-          const scale = 0.5 + 0.5 * Math.sin(progress * Math.PI * 0.5);
-          const alpha = Math.min(1, progress * 1.6);
-
-          maskCtx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
-
-          // Draw lobes for organic brush texture
-          for (let j = 0; j < s.lobes.length; j++) {
-            const lobe = s.lobes[j];
-            const lx = s.x + lobe.ox * scale;
-            const ly = s.y + lobe.oy * scale;
-            const lr = Math.max(1, lobe.r * scale);
-
-            maskCtx.beginPath();
-            maskCtx.arc(lx, ly, lr, 0, Math.PI * 2);
-            maskCtx.fill();
+          if (fluidHead.speed > 0.4 || Math.hypot(dx, dy) > 0.8) {
+            applyFluidMovement(nextX, nextY, fluidHead.speed);
+            const speedNorm = Math.min(fluidHead.speed / (10 * dpr), 3);
+            triggerBrushSound(speedNorm);
+          } else if (!fluidHead.isMoving) {
+            // Settled completely to full stop
+            fluidHead.active = false;
+            fluidHead.vx = 0;
+            fluidHead.vy = 0;
+            fluidHead.speed = 0;
+            updateComposite();
           }
         }
-
-        // If no active stamps, clear main visible canvas so front image shows untouched
-        if (activeCount === 0) {
-          ctx.clearRect(0, 0, canvasW, canvasH);
-          return;
-        }
-
-        // -----------------------------------------------------------
-        // 2. Prepare backMaskCanvas: BACK image masked by maskCanvas
-        // -----------------------------------------------------------
-        backMaskCtx.clearRect(0, 0, canvasW, canvasH);
-        backMaskCtx.globalCompositeOperation = 'source-over';
-        backMaskCtx.drawImage(imgBack, fit.dx, fit.dy, fit.dw, fit.dh);
-
-        // Clip to mask: keep only back image pixels where mask is opaque
-        backMaskCtx.globalCompositeOperation = 'destination-in';
-        backMaskCtx.drawImage(maskCanvas, 0, 0);
-
-        // -----------------------------------------------------------
-        // 3. Prepare bufferCanvas:
-        //    Step A: Draw FRONT portrait.
-        //    Step B: Erase FRONT portrait inside brush mask (destination-out).
-        //    Step C: Draw masked BACK image into the erased area (source-over).
-        // -----------------------------------------------------------
-        bufferCtx.clearRect(0, 0, canvasW, canvasH);
-
-        // Step A: Draw FRONT portrait
-        bufferCtx.globalCompositeOperation = 'source-over';
-        bufferCtx.drawImage(imgFront, fit.dx, fit.dy, fit.dw, fit.dh);
-
-        // Step B: Erase FRONT inside brush mask
-        bufferCtx.globalCompositeOperation = 'destination-out';
-        bufferCtx.drawImage(maskCanvas, 0, 0);
-
-        // Step C: Draw BACK image into reveal region
-        bufferCtx.globalCompositeOperation = 'source-over';
-        bufferCtx.drawImage(backMaskCanvas, 0, 0);
-
-        // -----------------------------------------------------------
-        // 4. Output composited buffer onto main visible canvas
-        // -----------------------------------------------------------
-        ctx.clearRect(0, 0, canvasW, canvasH);
-        ctx.drawImage(bufferCanvas, 0, 0);
       }
 
       requestAnimationFrame(render);

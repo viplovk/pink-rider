@@ -11,5 +11,8 @@
   },
   "keywords": ["fashion", "monochrome", "motorcycle", "interactive", "editorial"],
   "author": "Viplov",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "sharp": "^0.35.5"
+  }
 }
